@@ -1,0 +1,79 @@
+#include <iostream>
+#include <opencv2/core/core_c.h>
+#include <opencv2/highgui/highgui_c.h>
+#include <opencv2/imgproc/imgproc_c.h>
+
+// CUDA kernel for Sobel edge detection
+_global_ void sobel_filter(const uchar* input, uchar* output, int width, int height) {
+    // Calculate pixel coordinates (x, y) based on thread and block indices
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // Check if the pixel is within the image boundaries, excluding the border
+    if (x > 0 && y > 0 && x < width - 1 && y < height - 1) {
+        // Calculate the linear index of the pixel in the input image
+        int index = y * width + x;
+
+        // Compute the horizontal and vertical gradients using Sobel operators
+        int gx = -input[(y - 1) * width + (x - 1)] + input[(y - 1) * width + (x + 1)]
+                 -2 * input[y * width + (x - 1)] + 2 * input[y * width + (x + 1)]
+                 -input[(y + 1) * width + (x - 1)] + input[(y + 1) * width + (x + 1)];
+
+        int gy = input[(y - 1) * width + (x - 1)] + 2 * input[(y - 1) * width + x] + input[(y - 1) * width + (x + 1)]
+                 -input[(y + 1) * width + (x - 1)] - 2 * input[(y + 1) * width + x] - input[(y + 1) * width + (x + 1)];
+
+        // Compute the magnitude of the gradient and store it in the output image
+        output[index] = sqrtf(gx * gx + gy * gy);
+    }
+}
+
+int main() {
+    // Load the input image as a grayscale image using OpenCV
+    IplImage* input_image = cvLoadImage("path/to/your/input/image.jpg", CV_LOAD_IMAGE_GRAYSCALE);
+    if (!input_image) {
+        std::cout << "Error: Could not load input image." << std::endl;
+        return -1;
+    }
+
+    // Create an empty image with the same size as the input image to store the output
+    IplImage* output_image = cvCreateImage(cvGetSize(input_image), IPL_DEPTH_8U, 1);
+
+    // Allocate device memory for input and output images
+    uchar* d_input;
+    uchar* d_output;
+    int imageSize = input_image->width * input_image->height;
+    cudaMalloc((void**)&d_input, imageSize);
+    cudaMalloc((void**)&d_output, imageSize);
+
+    // Copy the input image data to the device memory
+    cudaMemcpy(d_input, input_image->imageData, imageSize, cudaMemcpyHostToDevice);
+
+    // Define the block and grid sizes for the CUDA kernel
+    dim3 blockDim(16, 16);
+    dim3 gridDim((input_image->width + blockDim.x - 1) / blockDim.x, (input_image->height + blockDim.y - 1) / blockDim.y);
+
+    // Launch the CUDA kernel to perform Sobel edge detection
+    sobel_filter<<<gridDim, blockDim>>>(d_input, d_output, input_image->width, input_image->height);
+    // Copy the output image data back from the device memory to the host memory
+    cudaMemcpy(output_image->imageData, d_output, imageSize, cudaMemcpyDeviceToHost);
+
+    // Display the input and output images using OpenCV windows
+    cvNamedWindow("Input Image", CV_WINDOW_AUTOSIZE);
+    cvShowImage("Input Image", input_image);
+    cvNamedWindow("Edge Detection", CV_WINDOW_AUTOSIZE);
+    cvShowImage("Edge Detection", output_image);
+
+    // Wait for a key press and then close the OpenCV windows
+    cvWaitKey(0);
+    cvDestroyAllWindows();
+
+    // Release the memory allocated for the input and output images
+    cvReleaseImage(&input_image);
+    cvReleaseImage(&output_image);
+
+    // Free the device memory allocated for the input and output images
+    cudaFree(d_input);
+    cudaFree(d_output);
+
+    return 0;
+}

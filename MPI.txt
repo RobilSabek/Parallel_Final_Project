@@ -1,0 +1,96 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <mpi.h>
+#include <opencv2/core/core_c.h>
+#include <opencv2/highgui/highgui_c.h>
+#include <opencv2/imgproc/imgproc_c.h>
+#include <opencv2/objdetect/objdetect_c.h>
+
+int main(int argc, char **argv) {
+    int world_size, world_rank;
+
+    // Initialize MPI environment
+    MPI_Init(&argc, &argv);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+
+    // Load the Haar Cascade Classifier
+    char *cascade_name = "path/to/your/haarcascade_frontalface_default.xml";
+    CvHaarClassifierCascade *cascade = (CvHaarClassifierCascade *) cvLoad(cascade_name, 0, 0, 0);
+    if (!cascade) {
+        fprintf(stderr, "ERROR: Could not load classifier cascade\n");
+        return -1;
+    }
+
+    // Read the input image
+    IplImage *input_image = cvLoadImage("path/to/your/input/image.jpg", CV_LOAD_IMAGE_GRAYSCALE);
+    if (!input_image) {
+        fprintf(stderr, "ERROR: Could not load input image\n");
+        return -1;
+    }
+
+    // Divide the image into equal parts based on the number of processes
+    CvRect roi;
+    roi.width = input_image->width;
+    roi.height = input_image->height / world_size;
+    roi.x = 0;
+    roi.y = roi.height * world_rank;
+
+    // Set the region of interest for each process
+    cvSetImageROI(input_image, roi);
+
+    // Perform object detection using Haar Cascade Classifier
+    CvMemStorage *storage = cvCreateMemStorage(0);
+    CvSeq *objects = cvHaarDetectObjects(input_image, cascade, storage, 1.1, 2, CV_HAAR_SCALE_IMAGE, cvSize(30, 30), cvSize(0, 0));
+
+    // Gather results from all processes
+    int num_objects = objects->total;
+    CvRect *rectangles = malloc(num_objects * sizeof(CvRect));
+    for (int i = 0; i < num_objects; i++) {
+        rectangles[i] = *(CvRect *) cvGetSeqElem(objects, i);
+    }
+    int *recv_counts = NULL;
+    CvRect *global_rectangles = NULL;
+
+    if (world_rank == 0) {
+        recv_counts = malloc(world_size * sizeof(int));
+        global_rectangles = malloc(world_size * num_objects * sizeof(CvRect));
+    }
+
+    MPI_Gather(&num_objects, 1, MPI_INT, recv_counts, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Gatherv(rectangles, num_objects, MPI_BYTE, global_rectangles, recv_counts, NULL, MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    // Display results (only on the root process)
+    if (world_rank == 0) {
+        IplImage *color_image = cvLoadImage("path/to/your/input/image.jpg", CV_LOAD_IMAGE_COLOR);
+
+        int offset = 0;
+        for (int i = 0; i < world_size; i++) {
+            for (int j = 0; j < recv_counts[i]; j++) {
+                CvRect *rect = &global_rectangles[offset + j];
+                cvRectangle(color_image, cvPoint(rect->x, rect->y), cvPoint(rect->x + rect->width, rect->y + rect->height), CV_RGB(255, 0, 0), 2, 8, 0);
+            }
+            offset += recv_counts[i];
+        }
+
+        cvNamedWindow("Detected Objects", CV_WINDOW_AUTOSIZE);
+        cvShowImage("Detected Objects", color_image);
+        cvWaitKey(0);
+        cvDestroyWindow("Detected Objects");
+        cvReleaseImage(&color_image);
+
+        free(recv_counts);
+        free(global_rectangles);
+    }
+
+    // Clean up
+    free(rectangles);
+    cvReleaseMemStorage(&storage);
+    cvReleaseImage(&input_image);
+    cvReleaseHaarClassifierCascade(&cascade);
+
+    // Finalize MPI environment
+    MPI_Finalize();
+
+    return 0;
+}

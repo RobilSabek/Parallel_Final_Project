@@ -1,0 +1,86 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <omp.h>
+#include <opencv2/core/core_c.h>
+#include <opencv2/highgui/highgui_c.h>
+#include <opencv2/imgproc/imgproc_c.h>
+#include <opencv2/objdetect/objdetect_c.h>
+
+int main(int argc, char **argv) {
+    // Load the Haar Cascade Classifier
+    char *cascade_name = "path/to/your/haarcascade_frontalface_default.xml";
+    CvHaarClassifierCascade *cascade = (CvHaarClassifierCascade *) cvLoad(cascade_name, 0, 0, 0);
+    if (!cascade) {
+        fprintf(stderr, "ERROR: Could not load classifier cascade\n");
+        return -1;
+    }
+
+    // Read the input image
+    IplImage *input_image = cvLoadImage("path/to/your/input/image.jpg", CV_LOAD_IMAGE_GRAYSCALE);
+    if (!input_image) {
+        fprintf(stderr, "ERROR: Could not load input image\n");
+        return -1;
+    }
+
+    int num_threads = omp_get_max_threads();
+    int num_objects = 0;
+    CvSeq *objects[num_threads];
+    CvMemStorage *storages[num_threads];
+
+    // Perform object detection using Haar Cascade Classifier in parallel
+    #pragma omp parallel
+    {
+        int thread_id = omp_get_thread_num();
+        CvRect roi;
+
+        // Divide the image into equal parts based on the number of threads
+        roi.width = input_image->width;
+        roi.height = input_image->height / num_threads;
+        roi.x = 0;
+        roi.y = roi.height * thread_id;
+
+        // Set the region of interest for each thread
+        cvSetImageROI(input_image, roi);
+
+        // Perform object detection
+        storages[thread_id] = cvCreateMemStorage(0);
+        objects[thread_id] = cvHaarDetectObjects(input_image, cascade, storages[thread_id], 1.1, 2, CV_HAAR_SCALE_IMAGE, cvSize(30, 30), cvSize(0, 0));
+
+        // Reset image ROI
+        cvResetImageROI(input_image);
+
+        #pragma omp critical
+        num_objects += objects[thread_id]->total;
+    }
+
+    // Combine detected objects from all threads
+    CvRect rectangles[num_objects];
+    int idx = 0;
+    for (int i = 0; i < num_threads; i++) {
+        for (int j = 0; j < objects[i]->total; j++) {
+            rectangles[idx++] = *(CvRect *)cvGetSeqElem(objects[i], j);
+        }
+    }
+
+    // Display results
+    IplImage *color_image = cvLoadImage("path/to/your/input/image.jpg", CV_LOAD_IMAGE_COLOR);
+    for (int i = 0; i < num_objects; i++) {
+        CvRect *rect = &rectangles[i];
+        cvRectangle(color_image, cvPoint(rect->x, rect->y), cvPoint(rect->x + rect->width, rect->y + rect->height), CV_RGB(255, 0, 0), 2, 8, 0);
+    }
+
+        cvNamedWindow("Detected Objects", CV_WINDOW_AUTOSIZE);
+    cvShowImage("Detected Objects", color_image);
+    cvWaitKey(0);
+    cvDestroyWindow("Detected Objects");
+    cvReleaseImage(&color_image);
+
+    // Clean up
+    for (int i = 0; i < num_threads; i++) {
+        cvReleaseMemStorage(&storages[i]);
+    }
+    cvReleaseImage(&input_image);
+    cvReleaseHaarClassifierCascade(&cascade);
+
+    return 0;
+}
